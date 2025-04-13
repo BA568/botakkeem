@@ -1,95 +1,95 @@
 
-import firebase_admin
-from firebase_admin import credentials, db
+import os
+import json
+import logging
 from telegram import Update
-from telegram.ext import Updater, CommandHandler, CallbackContext, MessageHandler, Filters
-import random
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# Load Firebase
-cred = credentials.Certificate("firebase.json")
-firebase_admin.initialize_app(cred, {
-    'databaseURL': 'https://piwalletwithdrawel.firebaseio.com/'
-})
+logging.basicConfig(level=logging.INFO)
 
-# Telegram Setup
-BOT_TOKEN = '7557926144:AAH3bBKcAoLgO5KTHWjXWmHY9Q3Rm5FM6u0'
-AUTHORIZED_USERS = ["@Banky664", "@RITAHERNANDEZ001"]
-ADMIN = "@RITAHERNANDEZ001"
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+ALERT_USER = os.getenv("ALERT_USER", "@Banky664")
+WALLET_FILE = "wallets.json"
 
-# In-Memory Store
-user_requests = {}
+# Load wallet data
+def load_wallets():
+    try:
+        with open(WALLET_FILE, "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
 
-def start(update: Update, context: CallbackContext):
-    update.message.reply_text("👑 Welcome to the Pi Withdrawal Bot. Type /withdraw to begin.")
+def save_wallets(wallets):
+    with open(WALLET_FILE, "w") as f:
+        json.dump(wallets, f, indent=2)
 
-def withdraw(update: Update, context: CallbackContext):
-    user_id = update.effective_user.id
-    user_requests[user_id] = {"step": 1}
-    update.message.reply_text("Enter your Pi wallet address 🧾:")
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🤖 Welcome to Pi Wallet Monitor Bot!
+Use /manual to see commands.")
 
-def handle_message(update: Update, context: CallbackContext):
-    user_id = update.effective_user.id
-    text = update.message.text
+async def manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📜 *Bot Manual*
+"
+        "💠 /addwallet <wallet> - Add wallet to monitor
+"
+        "💠 /removewallet <wallet> - Remove wallet
+"
+        "💠 /listwallets - View all tracked wallets
+"
+        "💠 /history - View balance history
+"
+        "💠 /manual - Show this help message",
+        parse_mode="Markdown"
+    )
 
-    if user_id not in user_requests:
-        return
-
-    step = user_requests[user_id]["step"]
-
-    if step == 1:
-        user_requests[user_id]["wallet"] = text
-        user_requests[user_id]["step"] = 2
-        update.message.reply_text("Enter amount to withdraw 💰:")
-    elif step == 2:
-        user_requests[user_id]["amount"] = text
-        passcode = str(random.randint(100000, 999999))
-        user_requests[user_id]["passcode"] = passcode
-
-        # Save to Firebase
-        ref = db.reference(f"/requests/{user_id}")
-        ref.set(user_requests[user_id])
-
-        # Notify admin
-        context.bot.send_message(chat_id=ADMIN,
-            text=f"🛡️ New Withdrawal Request:\n\n👤 User: @{update.effective_user.username}\n💰 Amount: {text}\n🏦 Wallet: {user_requests[user_id]['wallet']}\n\nReply with:\n/approve {user_id} {passcode}")
-
-        update.message.reply_text("📨 Request submitted. Awaiting admin approval...")
-
-        # Reset
-        user_requests.pop(user_id)
-
-def approve(update: Update, context: CallbackContext):
-    args = context.args
-    if len(args) != 2:
-        update.message.reply_text("Usage: /approve <user_id> <passcode>")
-        return
-
-    user_id, code = args
-    ref = db.reference(f"/requests/{user_id}")
-    data = ref.get()
-
-    if data and data.get("passcode") == code:
-        tx_hash = f"0xSIMULATED{random.randint(1000000,9999999)}"
-        context.bot.send_message(chat_id=int(user_id),
-            text=f"✅ Approved!\n\n💰 Amount: {data['amount']}\n🏦 Wallet: {data['wallet']}\n\n🔁 TX HASH: `{tx_hash}`",
-            parse_mode='Markdown')
-
-        context.bot.send_message(chat_id=ADMIN, text=f"✅ Sent to {data['wallet']} with hash {tx_hash}")
-        ref.delete()
+async def add_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) != 1:
+        return await update.message.reply_text("❌ Usage: /addwallet <wallet>")
+    wallet = context.args[0]
+    wallets = load_wallets()
+    user_id = str(update.message.from_user.id)
+    wallets.setdefault(user_id, [])
+    if wallet not in wallets[user_id]:
+        wallets[user_id].append(wallet)
+        save_wallets(wallets)
+        await update.message.reply_text(f"✅ Wallet {wallet} added.")
     else:
-        update.message.reply_text("❌ Invalid passcode or request")
+        await update.message.reply_text("⚠️ Wallet already tracked.")
 
-def main():
-    updater = Updater(BOT_TOKEN, use_context=True)
-    dp = updater.dispatcher
+async def remove_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) != 1:
+        return await update.message.reply_text("❌ Usage: /removewallet <wallet>")
+    wallet = context.args[0]
+    wallets = load_wallets()
+    user_id = str(update.message.from_user.id)
+    if wallet in wallets.get(user_id, []):
+        wallets[user_id].remove(wallet)
+        save_wallets(wallets)
+        await update.message.reply_text(f"🗑️ Wallet {wallet} removed.")
+    else:
+        await update.message.reply_text("❌ Wallet not found.")
 
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("withdraw", withdraw))
-    dp.add_handler(CommandHandler("approve", approve))
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
+async def list_wallets(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.message.from_user.id)
+    wallets = load_wallets().get(user_id, [])
+    if wallets:
+        await update.message.reply_text("📦 Your wallets:
+" + "
+".join(wallets))
+    else:
+        await update.message.reply_text("📭 No wallets being tracked.")
 
-    updater.start_polling()
-    updater.idle()
+async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📜 Balance history coming soon!")
 
-if __name__ == '__main__':
-    main()
+app = ApplicationBuilder().token(TOKEN).build()
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("manual", manual))
+app.add_handler(CommandHandler("addwallet", add_wallet))
+app.add_handler(CommandHandler("removewallet", remove_wallet))
+app.add_handler(CommandHandler("listwallets", list_wallets))
+app.add_handler(CommandHandler("history", history))
+
+if __name__ == "__main__":
+    app.run_polling()
